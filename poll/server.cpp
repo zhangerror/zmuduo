@@ -26,11 +26,24 @@
 typedef std::vector<struct pollfd> PollFdList;
 
 int main(void) {
+		/*
+			If client closes the socket and the server calls write, 
+				the server will receive a RST segment.
+				If the server calls write again, the SIGPIPE signal will be generated.
+			If this signal is not processed, the server will exit the whole process,
+				but the highly available server would be uninterrupted 7*24 hours,
+				this signal is ignored here.
+				
+		*/
         signal(SIGPIPE, SIG_IGN);
         signal(SIGCHLD, SIG_IGN);
 
-        int listenfd;
+		/* Prepare an idle file descriptor. */
+        int idlefd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+		
+		int listenfd;
 
+		/* SOCK_CLOEXEC: Indicates that the descriptor is set to close when the process is replaced. */
         if((listenfd = socket(PF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, IPPROTO_TCP)) < 0)
         ERR_EXIT("socket");
 
@@ -74,8 +87,26 @@ int main(void) {
                         connfd = accept4(listenfd, (struct sockaddr*)&peeraddr,
                                                 &peerlen, SOCK_NONBLOCK | SOCK_CLOEXEC);
 
-//                      if(connfd == -1) ERR_EXIT("accept4");
+						//if(connfd == -1) ERR_EXIT("accept4");
 
+						/* 
+							Function accept4 return the processing of EMFILE ( the file descriptor opened by the process exceeds the upper limit ): 
+								close the idle file to get a file descriptor quota,
+								close immediately, so that the connection with the client is gracefully disconnected,
+								open the idle file again for use in case of this situation again.
+						*/
+						if (connfd == -1) {
+							if (errno == EMFILE) {
+								close(idlefd);
+								idlefd = accept(listenfd, NULL, NULL);
+								close(idlefd);
+								idlefd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+								continue;
+							}
+							else
+								ERR_EXIT("accept4");
+						}
+						
                         pfd.fd = connfd;
                         pfd.events = POLLIN;
                         pfd.revents = 0;
